@@ -68,29 +68,40 @@ class ImageListWidget(QListWidget):
         self.setSpacing(10)
         self.itemDoubleClicked.connect(self._on_double_click)
         self.currentItemChanged.connect(self._on_selection_changed)
+        self._loaders = []  # 跟踪加载器
 
     def add_images(self, images: List[ImageInfo]):
         """添加图片到列表"""
-        for img in images:
+        # 清除旧的加载器
+        self._loaders.clear()
+
+        for i, img in enumerate(images):
             item = QListWidgetItem()
             item.setData(Qt.UserRole, img)
-            item.setText(f"{img.title}\n{img.width}x{img.height}")
+            item.setText(f"{img.title[:30]}...\n{img.width}x{img.height}")
             self.addItem(item)
 
-            # 异步加载预览图
-            if img.preview_url:
+            # 异步加载预览图（限制并发数）
+            if img.preview_url and i < 30:  # 只加载前30张的预览
                 self._load_preview(item, img.preview_url)
 
     def _load_preview(self, item, url: str):
         """异步加载预览图"""
         loader = ImageLoader(url, item)
         loader.finished.connect(lambda pix: self._set_icon(item, pix))
+        loader.finished.connect(lambda: self._on_loader_done(loader))
+        self._loaders.append(loader)
         loader.start()
 
     def _set_icon(self, item, pixmap: Optional[QPixmap]):
         """设置图标"""
-        if pixmap:
+        if pixmap and not pixmap.isNull():
             item.setIcon(QIcon(pixmap))
+
+    def _on_loader_done(self, loader):
+        """加载器完成"""
+        if loader in self._loaders:
+            self._loaders.remove(loader)
 
     def _on_double_click(self, item: QListWidgetItem):
         """双击事件"""
@@ -107,7 +118,16 @@ class ImageListWidget(QListWidget):
 
     def clear_images(self):
         """清空列表"""
+        # 停止所有加载器
+        for loader in self._loaders:
+            loader.terminate()
+            loader.wait()
+        self._loaders.clear()
         self.clear()
+
+    def __del__(self):
+        """析构时清理"""
+        self.clear_images()
 
 
 class ImageLoader(QThread):
@@ -244,14 +264,39 @@ class MainWindow(QMainWindow):
         layout.addWidget(source_group)
 
         # 搜索面板
-        search_group = QGroupBox("搜索")
+        search_group = QGroupBox("浏览图片")
         search_layout = QVBoxLayout()
 
         # 关键词输入
-        search_layout.addWidget(QLabel("关键词:"))
+        search_layout.addWidget(QLabel("关键词（可选）:"))
         self.keyword_input = QLineEdit()
-        self.keyword_input.setPlaceholderText("输入搜索关键词...")
+        self.keyword_input.setPlaceholderText("留空直接获取推荐图片...")
         search_layout.addWidget(self.keyword_input)
+
+        # 按钮布局
+        btn_layout = QHBoxLayout()
+
+        # 推荐按钮
+        self.recommend_btn = QPushButton("推荐精选")
+        self.recommend_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                padding: 8px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+            QPushButton:pressed {
+                background-color: #E65100;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        btn_layout.addWidget(self.recommend_btn)
 
         # 搜索按钮
         self.search_btn = QPushButton("搜索")
@@ -273,7 +318,9 @@ class MainWindow(QMainWindow):
                 background-color: #cccccc;
             }
         """)
-        search_layout.addWidget(self.search_btn)
+        btn_layout.addWidget(self.search_btn)
+
+        search_layout.addLayout(btn_layout)
 
         search_group.setLayout(search_layout)
         layout.addWidget(search_group)
@@ -403,25 +450,60 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         """连接信号槽"""
+        self.recommend_btn.clicked.connect(self._on_recommend)
         self.search_btn.clicked.connect(self._on_search)
         self.browse_btn.clicked.connect(self._on_browse_directory)
         self.download_btn.clicked.connect(self._on_download)
         self.select_all_btn.clicked.connect(self._on_select_all)
         self.clear_selection_btn.clicked.connect(self._on_clear_selection)
 
+        # 启动时自动加载推荐图片
+        QTimer.singleShot(500, self._on_recommend)
+
     def _get_source_name(self) -> str:
         """获取选择的图片源内部名称"""
         display_name = self.source_combo.currentText()
         return self.SOURCE_MAP.get(display_name, "unsplash")
 
+    def _on_recommend(self):
+        """推荐精选按钮点击"""
+        # 使用推荐关键词
+        recommend_keywords = {
+            "unsplash": "nature landscape",
+            "pexels": "nature",
+            "pixabay": "landscape",
+            "picsum": "random",
+            "wallhaven": "scenery",
+            "wallpaperflare": "nature",
+            "bing_daily": "daily",
+            "bing": "wallpaper",
+            "botian": "random",
+            "xiaowai": "random",
+            "wallpaper360": "scenery",
+            "jichangxin": "random",
+            "sakura_anime": "anime",
+        }
+
+        source_name = self._get_source_name()
+        keywords = recommend_keywords.get(source_name, "wallpaper")
+
+        self.keyword_input.setText(keywords)
+        self._do_search(keywords)
+
     def _on_search(self):
         """搜索按钮点击"""
         keywords = self.keyword_input.text().strip()
         if not keywords:
-            QMessageBox.warning(self, "警告", "请输入搜索关键词")
+            # 如果没有关键词，使用推荐
+            self._on_recommend()
             return
 
+        self._do_search(keywords)
+
+    def _do_search(self, keywords: str):
+        """执行搜索"""
         self.search_btn.setEnabled(False)
+        self.recommend_btn.setEnabled(False)
         self.status_label.setText("正在搜索...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # 不确定进度
@@ -488,6 +570,13 @@ class MainWindow(QMainWindow):
     def _update_search_results(self, results: List[ImageInfo]):
         """更新搜索结果"""
         self.image_list.clear_images()
+
+        if not results:
+            self.result_count_label.setText("共 0 张图片")
+            self.status_label.setText("未找到图片，请尝试其他关键词或图片源")
+            QMessageBox.information(self, "提示", "未找到图片，请尝试：\n1. 更换关键词\n2. 选择其他图片源\n3. 检查网络连接")
+            return
+
         self.image_list.add_images(results)
         self.result_count_label.setText(f"共 {len(results)} 张图片")
         self.status_label.setText(f"找到 {len(results)} 张图片")
@@ -495,11 +584,15 @@ class MainWindow(QMainWindow):
     def _search_finished(self):
         """搜索完成"""
         self.search_btn.setEnabled(True)
+        self.recommend_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_label.setText("就绪")
 
     def _show_error(self, message: str):
         """显示错误"""
+        self.search_btn.setEnabled(True)
+        self.recommend_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "错误", message)
         self.status_label.setText("错误")
 
