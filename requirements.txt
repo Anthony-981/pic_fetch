@@ -1,0 +1,29 @@
+# pic_fetch - 超清图片爬取工具
+# Python 依赖列表
+
+# GUI框架
+PySide6==6.8.0
+
+# 异步网络
+aiohttp==3.11.11
+aiofiles==24.1.0
+
+# 数据验证
+pydantic==2.10.6
+
+# 网页爬虫
+playwright==1.49.0
+beautifulsoup4==4.12.3
+lxml==6.1.0
+
+# 图片处理
+Pillow==11.1.0
+imagehash==4.4.1
+
+# 工具库
+python-dotenv==1.0.1
+tenacity==9.0.0
+tqdm==4.67.1
+
+# 打包工具
+PyInstaller==6.12.0
