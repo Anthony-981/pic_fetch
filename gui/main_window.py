@@ -30,6 +30,7 @@ import sources.picsum_adapter
 import sources.bing_daily_adapter
 import sources.chinese_wallpaper_apis
 import sources.sakura_anime_adapter
+import sources.test_adapter
 
 
 class SearchWorker(QThread):
@@ -182,6 +183,9 @@ class MainWindow(QMainWindow):
 
     # 图片源映射
     SOURCE_MAP = {
+        # 测试源（无需API Key）
+        "测试图片源（推荐）": "test",
+
         # 国际图库
         "Unsplash（高清网图）": "unsplash",
         "Pexels（免费图库）": "pexels",
@@ -463,12 +467,13 @@ class MainWindow(QMainWindow):
     def _get_source_name(self) -> str:
         """获取选择的图片源内部名称"""
         display_name = self.source_combo.currentText()
-        return self.SOURCE_MAP.get(display_name, "unsplash")
+        return self.SOURCE_MAP.get(display_name, "test")  # 默认使用测试源
 
     def _on_recommend(self):
         """推荐精选按钮点击"""
         # 使用推荐关键词
         recommend_keywords = {
+            "test": "wallpaper",
             "unsplash": "nature landscape",
             "pexels": "nature",
             "pixabay": "landscape",
@@ -535,6 +540,9 @@ class MainWindow(QMainWindow):
                 elif source_name == "bing":
                     config["api_key"] = os.getenv("BING_API_KEY")
 
+                print(f"[DEBUG] 使用图片源: {source_name}")
+                print(f"[DEBUG] 关键词: {keywords}")
+
                 adapter = await self.source_manager.get_adapter(source_name, config=config)
                 self.current_adapter = adapter
 
@@ -546,12 +554,16 @@ class MainWindow(QMainWindow):
                 )
 
                 results = await adapter.search(params)
+                print(f"[DEBUG] 找到 {len(results)} 张图片")
                 self.search_results = results
 
                 # 在主线程更新UI
                 QTimer.singleShot(0, lambda: self._update_search_results(results))
 
             except Exception as e:
+                import traceback
+                print(f"[ERROR] 搜索失败: {e}")
+                print(f"[ERROR] 详细错误:\n{traceback.format_exc()}")
                 QTimer.singleShot(0, lambda: self._show_error(f"搜索失败: {e}"))
             finally:
                 QTimer.singleShot(0, self._search_finished)
