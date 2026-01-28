@@ -62,47 +62,20 @@ class ImageListWidget(QListWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setViewMode(QListWidget.IconMode)
-        self.setGridSize(QSize(220, 280))
-        self.setIconSize(QSize(200, 200))
+        self.setViewMode(QListWidget.ListMode)  # 先用列表模式确保能显示
+        self.setIconSize(QSize(150, 100))
         self.setResizeMode(QListWidget.Adjust)
-        self.setSpacing(10)
+        self.setSpacing(5)
         self.itemDoubleClicked.connect(self._on_double_click)
         self.currentItemChanged.connect(self._on_selection_changed)
-        self._loaders = []  # 跟踪加载器
 
     def add_images(self, images: List[ImageInfo]):
         """添加图片到列表"""
-        # 清除旧的加载器
-        self._loaders.clear()
-
-        for i, img in enumerate(images):
+        for img in images:
             item = QListWidgetItem()
             item.setData(Qt.UserRole, img)
-            item.setText(f"{img.title[:30]}...\n{img.width}x{img.height}")
+            item.setText(f"[{img.source}] {img.title[:50]} - {img.width}x{img.height}")
             self.addItem(item)
-
-            # 异步加载预览图（限制并发数）
-            if img.preview_url and i < 30:  # 只加载前30张的预览
-                self._load_preview(item, img.preview_url)
-
-    def _load_preview(self, item, url: str):
-        """异步加载预览图"""
-        loader = ImageLoader(url, item)
-        loader.finished.connect(lambda pix: self._set_icon(item, pix))
-        loader.finished.connect(lambda: self._on_loader_done(loader))
-        self._loaders.append(loader)
-        loader.start()
-
-    def _set_icon(self, item, pixmap: Optional[QPixmap]):
-        """设置图标"""
-        if pixmap and not pixmap.isNull():
-            item.setIcon(QIcon(pixmap))
-
-    def _on_loader_done(self, loader):
-        """加载器完成"""
-        if loader in self._loaders:
-            self._loaders.remove(loader)
 
     def _on_double_click(self, item: QListWidgetItem):
         """双击事件"""
@@ -119,60 +92,7 @@ class ImageListWidget(QListWidget):
 
     def clear_images(self):
         """清空列表"""
-        # 停止所有加载器
-        for loader in self._loaders:
-            loader.terminate()
-            loader.wait()
-        self._loaders.clear()
         self.clear()
-
-    def __del__(self):
-        """析构时清理"""
-        self.clear_images()
-
-
-class ImageLoader(QThread):
-    """图片加载线程"""
-    finished = Signal(object)
-
-    def __init__(self, url: str, item: QListWidgetItem):
-        super().__init__()
-        self.url = url
-        self.item = item
-
-    def run(self):
-        import urllib.request
-        try:
-            req = urllib.request.Request(self.url)
-            req.add_header('User-Agent', 'Mozilla/5.0')
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = response.read()
-                pixmap = QPixmap()
-                if pixmap.loadFromData(data):
-                    self.finished.emit(pixmap)
-        except Exception as e:
-            print(f"加载图片失败: {e}")
-            self.finished.emit(None)
-
-
-class DownloadQueueWidget(QWidget):
-    """下载队列组件"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-
-        # 标题
-        header = QLabel("下载队列")
-        header.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(header)
-
-        # 列表
-        self.list_widget = QListWidget()
-        layout.addWidget(self.list_widget)
 
 
 class MainWindow(QMainWindow):
@@ -432,8 +352,12 @@ class MainWindow(QMainWindow):
         tab_widget.addTab(preview_widget, "图片预览")
 
         # 下载队列标签页
-        self.download_queue = DownloadQueueWidget()
-        tab_widget.addTab(self.download_queue, "下载队列")
+        download_widget = QWidget()
+        download_layout = QVBoxLayout(download_widget)
+        download_label = QLabel("下载队列（即将实现）")
+        download_layout.addWidget(download_label)
+        download_layout.addStretch()
+        tab_widget.addTab(download_widget, "下载队列")
 
         return tab_widget
 

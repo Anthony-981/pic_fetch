@@ -43,12 +43,15 @@ class TestAdapter(BaseSourceAdapter):
 
         # 直接生成图片 URL，不依赖 API
         for i in range(count):
-            # 使用随机种子获取不同图片
-            seed = f"{params.keywords}_{params.page}_{i}" if params.keywords else f"test_{params.page}_{i}"
+            # 使用随机数确保每次都不同
+            import random
+            random_id = random.randint(1, 1000)
+            seed = f"{params.keywords}_{params.page}_{i}" if params.keywords else f"{random_id}_{params.page}_{i}"
             width = 1920
             height = 1080
 
-            img_url = f"{self.BASE_URL}/{width}/{height}?random={i}"
+            # Picsum Photos URL
+            img_url = f"{self.BASE_URL}/seed/{seed}/{width}/{height}.jpg"
 
             images.append(ImageInfo(
                 url=img_url,
@@ -58,7 +61,7 @@ class TestAdapter(BaseSourceAdapter):
                 height=height,
                 format="jpg",
                 source=self.source_name,
-                preview_url=img_url,
+                preview_url=f"{self.BASE_URL}/seed/{seed}/400/300.jpg",
                 download_url=img_url
             ))
 
