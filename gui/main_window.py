@@ -38,18 +38,27 @@ class SearchWorker(QThread):
     finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, adapter, params: SearchParams):
+    def __init__(self, source_manager, source_name: str, config: dict, params: SearchParams):
         super().__init__()
-        self.adapter = adapter
+        self.source_manager = source_manager
+        self.source_name = source_name
+        self.config = config
         self.params = params
 
     def run(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            result = loop.run_until_complete(self.adapter.search(self.params))
-            self.finished.emit(result)
+            async def do_search():
+                adapter = await self.source_manager.get_adapter(self.source_name, config=self.config)
+                result = await adapter.search(self.params)
+                return result, adapter
+
+            result, adapter = loop.run_until_complete(do_search())
+            self.finished.emit((result, adapter))
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self.error.emit(str(e))
         finally:
             loop.close()
@@ -71,11 +80,16 @@ class ImageListWidget(QListWidget):
 
     def add_images(self, images: List[ImageInfo]):
         """添加图片到列表"""
-        for img in images:
+        print(f"[DEBUG] ImageListWidget.add_images() 被调用，收到 {len(images)} 张图片")
+        for i, img in enumerate(images):
             item = QListWidgetItem()
             item.setData(Qt.UserRole, img)
             item.setText(f"[{img.source}] {img.title[:50]} - {img.width}x{img.height}")
             self.addItem(item)
+            if i < 3:  # 只打印前3个
+                print(f"[DEBUG] 添加图片 {i+1}: {item.text()}")
+
+        print(f"[DEBUG] 列表现在有 {self.count()} 个项目")
 
     def _on_double_click(self, item: QListWidgetItem):
         """双击事件"""
@@ -92,6 +106,7 @@ class ImageListWidget(QListWidget):
 
     def clear_images(self):
         """清空列表"""
+        print(f"[DEBUG] ImageListWidget.clear_images() 被调用")
         self.clear()
 
 
@@ -449,62 +464,53 @@ class MainWindow(QMainWindow):
         if format_filter == "全部":
             format_filter = None
 
-        async def do_search():
-            try:
-                # 构建适配器配置
-                config = {}
-                if source_name == "unsplash":
-                    config["access_key"] = os.getenv("UNSPLASH_ACCESS_KEY")
-                elif source_name == "pexels":
-                    config["api_key"] = os.getenv("PEXELS_API_KEY")
-                elif source_name == "pixabay":
-                    config["api_key"] = os.getenv("PIXABAY_API_KEY")
-                elif source_name == "wallhaven":
-                    config["api_key"] = os.getenv("WALLHAVEN_API_KEY")
-                elif source_name == "bing":
-                    config["api_key"] = os.getenv("BING_API_KEY")
+        # 构建适配器配置
+        config = {}
+        if source_name == "unsplash":
+            config["access_key"] = os.getenv("UNSPLASH_ACCESS_KEY")
+        elif source_name == "pexels":
+            config["api_key"] = os.getenv("PEXELS_API_KEY")
+        elif source_name == "pixabay":
+            config["api_key"] = os.getenv("PIXABAY_API_KEY")
+        elif source_name == "wallhaven":
+            config["api_key"] = os.getenv("WALLHAVEN_API_KEY")
+        elif source_name == "bing":
+            config["api_key"] = os.getenv("BING_API_KEY")
 
-                print(f"[DEBUG] 使用图片源: {source_name}")
-                print(f"[DEBUG] 关键词: {keywords}")
+        print(f"[DEBUG] 使用图片源: {source_name}")
+        print(f"[DEBUG] 关键词: {keywords}")
 
-                adapter = await self.source_manager.get_adapter(source_name, config=config)
-                self.current_adapter = adapter
+        params = SearchParams(
+            keywords=keywords,
+            per_page=30,
+            resolution=resolution,
+            format=format_filter.lower() if format_filter else None
+        )
 
-                params = SearchParams(
-                    keywords=keywords,
-                    per_page=30,
-                    resolution=resolution,
-                    format=format_filter.lower() if format_filter else None
-                )
+        # 使用 SearchWorker
+        self.search_worker = SearchWorker(self.source_manager, source_name, config, params)
+        self.search_worker.finished.connect(self._on_search_finished)
+        self.search_worker.error.connect(self._on_search_error)
+        self.search_worker.start()
 
-                results = await adapter.search(params)
-                print(f"[DEBUG] 找到 {len(results)} 张图片")
-                self.search_results = results
+    def _on_search_finished(self, result):
+        """搜索完成"""
+        results, adapter = result
+        self.current_adapter = adapter
+        self.search_results = results
 
-                # 在主线程更新UI
-                QTimer.singleShot(0, lambda: self._update_search_results(results))
+        print(f"[DEBUG] 找到 {len(results)} 张图片")
+        self._update_search_results(results)
+        self._search_finished()
 
-            except Exception as e:
-                import traceback
-                print(f"[ERROR] 搜索失败: {e}")
-                print(f"[ERROR] 详细错误:\n{traceback.format_exc()}")
-                QTimer.singleShot(0, lambda: self._show_error(f"搜索失败: {e}"))
-            finally:
-                QTimer.singleShot(0, self._search_finished)
-
-        # 在新事件循环中运行
-        import threading
-        def run_in_thread():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(do_search())
-            loop.close()
-
-        thread = threading.Thread(target=run_in_thread, daemon=True)
-        thread.start()
+    def _on_search_error(self, error_msg: str):
+        """搜索错误"""
+        print(f"[ERROR] 搜索失败: {error_msg}")
+        self._show_error(f"搜索失败: {error_msg}")
 
     def _update_search_results(self, results: List[ImageInfo]):
         """更新搜索结果"""
+        print(f"[DEBUG] _update_search_results() 被调用，收到 {len(results)} 张图片")
         self.image_list.clear_images()
 
         if not results:
@@ -516,6 +522,7 @@ class MainWindow(QMainWindow):
         self.image_list.add_images(results)
         self.result_count_label.setText(f"共 {len(results)} 张图片")
         self.status_label.setText(f"找到 {len(results)} 张图片")
+        print(f"[DEBUG] UI更新完成")
 
     def _search_finished(self):
         """搜索完成"""
