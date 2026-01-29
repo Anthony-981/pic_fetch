@@ -7,14 +7,16 @@ from PySide6.QtWidgets import (
     QSplitter, QTabWidget, QStatusBar, QProgressBar,
     QLabel, QComboBox, QPushButton, QSpinBox, QLineEdit,
     QGroupBox, QListWidget, QListWidgetItem, QFileDialog,
-    QMessageBox, QCheckBox
+    QMessageBox, QCheckBox, QScrollArea, QDialog, QFormLayout, QTextEdit
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
-from PySide6.QtGui import QPixmap, QImage, QIcon, QAction
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QUrl
+from PySide6.QtGui import QPixmap, QImage, QIcon, QAction, QDesktopServices
 from pathlib import Path
 from typing import List, Optional
 import asyncio
 import os
+import aiohttp
+import aiofiles
 
 from core.base_adapter import ImageInfo, SearchParams, DownloadProgress
 from core.source_factory import SourceFactory, SourceManager
@@ -62,6 +64,186 @@ class SearchWorker(QThread):
             self.error.emit(str(e))
         finally:
             loop.close()
+
+
+class DownloadWorker(QThread):
+    """下载工作线程"""
+    progress = Signal(str, int, int)  # filename, downloaded, total
+    finished = Signal(str, str)  # filename, save_path
+    error = Signal(str, str)  # filename, error
+    all_finished = Signal()
+
+    def __init__(self, images: List[ImageInfo], save_dir: str):
+        super().__init__()
+        self.images = images
+        self.save_dir = save_dir
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._download_all())
+        finally:
+            loop.close()
+            self.all_finished.emit()
+
+    async def _download_all(self):
+        """下载所有图片"""
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        async with aiohttp.ClientSession() as session:
+            for img in self.images:
+                try:
+                    await self._download_one(session, img)
+                except Exception as e:
+                    self.error.emit(img.title, str(e))
+
+    async def _download_one(self, session: aiohttp.ClientSession, img: ImageInfo):
+        """下载单张图片"""
+        # 生成文件名
+        ext = os.path.splitext(img.url)[1] or ".jpg"
+        # 清理文件名
+        safe_title = "".join(c for c in img.title if c.isalnum() or c in (' ', '-', '_')).strip()
+        filename = f"{safe_title}_{img.width}x{img.height}{ext}"
+        if not filename:
+            filename = f"image_{os.urandom(4).hex()}{ext}"
+
+        save_path = os.path.join(self.save_dir, filename)
+
+        # 下载
+        async with session.get(img.url) as response:
+            if response.status == 200:
+                total = int(response.headers.get('content-length', 0))
+                downloaded = 0
+
+                async with aiofiles.open(save_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(8192):
+                        await f.write(chunk)
+                        downloaded += len(chunk)
+                        self.progress.emit(filename, downloaded, total)
+
+                self.finished.emit(filename, save_path)
+            else:
+                self.error.emit(img.title, f"HTTP {response.status}")
+
+
+class ImagePreviewWidget(QScrollArea):
+    """图片预览组件"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setAlignment(Qt.AlignCenter)
+
+        # 图片标签
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setMinimumSize(400, 300)
+        self.image_label.setStyleSheet("""
+            QLabel {
+                background-color: #2b2b2b;
+                border: 1px solid #444;
+            }
+        """)
+        self.image_label.setText("请选择一张图片预览")
+
+        self.setWidget(self.image_label)
+        self.current_image = None
+
+        # 信息标签
+        self.info_label = QLabel()
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setStyleSheet("color: #666; font-size: 12px; padding: 5px;")
+
+    def show_image(self, img: ImageInfo):
+        """显示图片"""
+        self.current_image = img
+
+        # 显示信息
+        info_text = (
+            f"标题: {img.title}\n"
+            f"来源: {img.source}\n"
+            f"尺寸: {img.width}x{img.height}\n"
+            f"格式: {img.format}"
+        )
+        self.image_label.setText(f"正在加载...\n\n{info_text}")
+
+        # 异步加载图片
+        self._load_image_async(img.url)
+
+    def _load_image_async(self, url: str):
+        """异步加载图片"""
+        import threading
+
+        def load_in_thread():
+            try:
+                import requests
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    img_data = response.content
+                    qimg = QImage.fromData(img_data)
+                    if qimg.isNull():
+                        # 如果直接加载失败，尝试用QPixmap
+                        pixmap = QPixmap()
+                        if pixmap.loadFromData(img_data):
+                            # 缩放图片以适应窗口
+                            scaled = pixmap.scaled(
+                                self.image_label.size(),
+                                Qt.KeepAspectRatio,
+                                Qt.SmoothTransformation
+                            )
+                            # 在主线程更新
+                            QTimer.singleShot(0, lambda: self._update_pixmap(scaled))
+                        else:
+                            QTimer.singleShot(0, lambda: self._show_error("图片格式不支持"))
+                    else:
+                        # 缩放图片
+                        pixmap = QPixmap.fromImage(qimg)
+                        scaled = pixmap.scaled(
+                            self.image_label.size(),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation
+                        )
+                        QTimer.singleShot(0, lambda: self._update_pixmap(scaled))
+                else:
+                    QTimer.singleShot(0, lambda: self._show_error(f"加载失败: HTTP {response.status_code}"))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._show_error(f"加载失败: {e}"))
+
+        thread = threading.Thread(target=load_in_thread, daemon=True)
+        thread.start()
+
+    def _update_pixmap(self, pixmap: QPixmap):
+        """更新显示的图片"""
+        img = self.current_image
+        if img:
+            info_text = (
+                f"标题: {img.title}\n"
+                f"来源: {img.source}\n"
+                f"尺寸: {img.width}x{img.height}\n"
+                f"格式: {img.format}"
+            )
+            self.image_label.setPixmap(pixmap)
+            self.info_label.setText(info_text)
+
+    def _show_error(self, message: str):
+        """显示错误"""
+        if self.current_image:
+            info_text = (
+                f"标题: {self.current_image.title}\n"
+                f"来源: {self.current_image.source}\n"
+                f"尺寸: {self.current_image.width}x{self.current_image.height}\n"
+                f"格式: {self.current_image.format}\n\n"
+                f"预览加载失败\n{message}"
+            )
+            self.image_label.setText(info_text)
+
+    def clear_image(self):
+        """清空图片"""
+        self.current_image = None
+        self.image_label.clear()
+        self.image_label.setText("请选择一张图片预览")
+        self.info_label.clear()
 
 
 class ImageListWidget(QListWidget):
@@ -343,11 +525,12 @@ class MainWindow(QMainWindow):
 
     def _create_right_panel(self) -> QWidget:
         """创建右侧面板"""
-        tab_widget = QTabWidget()
+        # 使用分割器分隔图片列表和预览
+        splitter = QSplitter(Qt.Vertical)
 
-        # 图片预览标签页
-        preview_widget = QWidget()
-        preview_layout = QVBoxLayout(preview_widget)
+        # 上半部分：图片列表
+        list_widget = QWidget()
+        list_layout = QVBoxLayout(list_widget)
 
         # 工具栏
         toolbar_layout = QHBoxLayout()
@@ -358,23 +541,24 @@ class MainWindow(QMainWindow):
         self.clear_selection_btn = QPushButton("取消选择")
         toolbar_layout.addWidget(self.select_all_btn)
         toolbar_layout.addWidget(self.clear_selection_btn)
-        preview_layout.addLayout(toolbar_layout)
+        list_layout.addLayout(toolbar_layout)
 
         # 图片列表
         self.image_list = ImageListWidget()
-        preview_layout.addWidget(self.image_list)
+        self.image_list.setMaximumHeight(300)
+        list_layout.addWidget(self.image_list)
 
-        tab_widget.addTab(preview_widget, "图片预览")
+        splitter.addWidget(list_widget)
 
-        # 下载队列标签页
-        download_widget = QWidget()
-        download_layout = QVBoxLayout(download_widget)
-        download_label = QLabel("下载队列（即将实现）")
-        download_layout.addWidget(download_label)
-        download_layout.addStretch()
-        tab_widget.addTab(download_widget, "下载队列")
+        # 下半部分：图片预览
+        self.preview_widget = ImagePreviewWidget()
+        splitter.addWidget(self.preview_widget)
 
-        return tab_widget
+        # 设置分割比例
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        return splitter
 
     def _create_status_bar(self):
         """创建状态栏"""
@@ -399,6 +583,9 @@ class MainWindow(QMainWindow):
         self.download_btn.clicked.connect(self._on_download)
         self.select_all_btn.clicked.connect(self._on_select_all)
         self.clear_selection_btn.clicked.connect(self._on_clear_selection)
+
+        # 图片选择信号
+        self.image_list.itemSelected.connect(self._on_image_selected)
 
         # 启动时自动加载推荐图片
         QTimer.singleShot(500, self._on_recommend)
@@ -565,12 +752,52 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText(f"准备下载 {len(images)} 张图片...")
 
-        # TODO: 实现下载逻辑
+        # 创建下载目录
+        os.makedirs(self.save_directory, exist_ok=True)
+
+        # 启动下载线程
+        self.download_worker = DownloadWorker(images, self.save_directory)
+        self.download_worker.progress.connect(self._on_download_progress)
+        self.download_worker.finished.connect(self._on_download_one_finished)
+        self.download_worker.error.connect(self._on_download_error)
+        self.download_worker.all_finished.connect(self._on_download_all_finished)
+        self.download_worker.start()
+
+    def _on_download_progress(self, filename: str, downloaded: int, total: int):
+        """下载进度"""
+        if total > 0:
+            percent = int(downloaded / total * 100)
+            self.status_label.setText(f"下载中: {filename} - {percent}%")
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(percent)
+        else:
+            self.status_label.setText(f"下载中: {filename} - {downloaded} bytes")
+
+    def _on_download_one_finished(self, filename: str, save_path: str):
+        """单张图片下载完成"""
+        print(f"[DEBUG] 下载完成: {filename} -> {save_path}")
+
+    def _on_download_error(self, filename: str, error: str):
+        """下载错误"""
+        print(f"[ERROR] 下载失败: {filename} - {error}")
+
+    def _on_download_all_finished(self):
+        """所有下载完成"""
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("下载完成！")
         QMessageBox.information(
             self,
-            "提示",
-            f"已选择 {len(images)} 张图片\n下载功能即将实现"
+            "完成",
+            f"图片已保存到:\n{self.save_directory}\n\n点击确定打开文件夹",
+            QMessageBox.Ok
         )
+        # 打开文件夹
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.save_directory))
+
+    def _on_image_selected(self, img: ImageInfo):
+        """图片选择事件"""
+        self.preview_widget.show_image(img)
 
     def _on_select_all(self):
         """全选"""
