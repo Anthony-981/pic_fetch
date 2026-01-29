@@ -246,6 +246,132 @@ class ImagePreviewWidget(QScrollArea):
         self.info_label.clear()
 
 
+class SettingsDialog(QDialog):
+    """设置对话框"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置")
+        self.setMinimumWidth(500)
+        self._init_ui()
+        self._load_settings()
+
+    def _init_ui(self):
+        """初始化UI"""
+        layout = QVBoxLayout(self)
+
+        # API密钥设置
+        api_group = QGroupBox("API 密钥")
+        api_layout = QFormLayout()
+
+        self.unsplash_key_input = QLineEdit()
+        self.unsplash_key_input.setPlaceholderText("输入 Unsplash Access Key")
+        api_layout.addRow("Unsplash:", self.unsplash_key_input)
+
+        self.pexels_key_input = QLineEdit()
+        self.pexels_key_input.setPlaceholderText("输入 Pexels API Key")
+        api_layout.addRow("Pexels:", self.pexels_key_input)
+
+        self.pixabay_key_input = QLineEdit()
+        self.pixabay_key_input.setPlaceholderText("输入 Pixabay API Key")
+        api_layout.addRow("Pixabay:", self.pixabay_key_input)
+
+        self.wallhaven_key_input = QLineEdit()
+        self.wallhaven_key_input.setPlaceholderText("输入 Wallhaven API Key (可选)")
+        api_layout.addRow("Wallhaven:", self.wallhaven_key_input)
+
+        self.bing_key_input = QLineEdit()
+        self.bing_key_input.setPlaceholderText("输入 Bing Search API Key (可选)")
+        api_layout.addRow("Bing:", self.bing_key_input)
+
+        api_group.setLayout(api_layout)
+        layout.addWidget(api_group)
+
+        # 说明
+        help_label = QLabel(
+            "\n获取 API 密钥说明:\n"
+            "• Unsplash: https://unsplash.com/developers\n"
+            "• Pexels: https://www.pexels.com/api/\n"
+            "• Pixabay: https://pixabay.com/api/docs/\n"
+            "• Wallhaven: https://wallhaven.cc/settings/account\n"
+            "• Bing: https://www.microsoft.com/cognitive-services\n\n"
+            "注意: API密钥会保存到 .env 文件中，请妥善保管。"
+        )
+        help_label.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(help_label)
+
+        # 按钮
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        self.save_btn = QPushButton("保存")
+        self.cancel_btn = QPushButton("取消")
+        button_layout.addWidget(self.save_btn)
+        button_layout.addWidget(self.cancel_btn)
+        layout.addLayout(button_layout)
+
+        # 连接信号
+        self.save_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+
+    def _load_settings(self):
+        """加载设置"""
+        from dotenv import load_dotenv
+        env_path = Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+            self.unsplash_key_input.setText(os.getenv("UNSPLASH_ACCESS_KEY", ""))
+            self.pexels_key_input.setText(os.getenv("PEXELS_API_KEY", ""))
+            self.pixabay_key_input.setText(os.getenv("PIXABAY_API_KEY", ""))
+            self.wallhaven_key_input.setText(os.getenv("WALLHAVEN_API_KEY", ""))
+            self.bing_key_input.setText(os.getenv("BING_API_KEY", ""))
+
+    def save_settings(self):
+        """保存设置"""
+        env_path = Path(__file__).parent.parent / ".env"
+
+        # 读取现有内容
+        existing_lines = []
+        if env_path.exists():
+            with open(env_path, 'r', encoding='utf-8') as f:
+                existing_lines = f.readlines()
+
+        # 更新的键值对
+        updates = {
+            "UNSPLASH_ACCESS_KEY": self.unsplash_key_input.text(),
+            "PEXELS_API_KEY": self.pexels_key_input.text(),
+            "PIXABAY_API_KEY": self.pixabay_key_input.text(),
+            "WALLHAVEN_API_KEY": self.wallhaven_key_input.text(),
+            "BING_API_KEY": self.bing_key_input.text(),
+        }
+
+        # 重写文件
+        with open(env_path, 'w', encoding='utf-8') as f:
+            for line in existing_lines:
+                # 检查是否是我们要更新的键
+                updated = False
+                for key, value in updates.items():
+                    if line.startswith(f"{key}="):
+                        if value:  # 只在非空时写入
+                            f.write(f'{key}="{value}"\n')
+                        updated = True
+                        del updates[key]
+                        break
+                if not updated:
+                    f.write(line)
+
+            # 写入新的键值对
+            for key, value in updates.items():
+                if value:
+                    f.write(f'{key}="{value}"\n')
+
+        # 更新环境变量
+        for key, value in updates.items():
+            if value:
+                os.environ[key] = value
+
+        return True
+
+
 class ImageListWidget(QListWidget):
     """图片列表组件"""
 
@@ -342,6 +468,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("图片爬取工具 v1.0")
         self.setGeometry(100, 100, 1400, 900)
 
+        # 创建菜单栏
+        self._create_menu_bar()
+
         # 中央组件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -367,6 +496,50 @@ class MainWindow(QMainWindow):
 
         # 状态栏
         self._create_status_bar()
+
+    def _create_menu_bar(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+
+        # 设置菜单
+        settings_menu = menubar.addMenu("设置")
+
+        # API设置
+        api_action = QAction("API 密钥配置", self)
+        api_action.triggered.connect(self._on_settings)
+        settings_menu.addAction(api_action)
+
+        # 帮助菜单
+        help_menu = menubar.addMenu("帮助")
+
+        # 关于
+        about_action = QAction("关于", self)
+        about_action.triggered.connect(self._on_about)
+        help_menu.addAction(about_action)
+
+    def _on_settings(self):
+        """打开设置对话框"""
+        dialog = SettingsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            dialog.save_settings()
+            QMessageBox.information(self, "设置", "设置已保存，请重新搜索以使用新的API密钥")
+
+    def _on_about(self):
+        """关于对话框"""
+        QMessageBox.about(
+            self,
+            "关于",
+            "<h3>图片爬取工具 v1.0</h3>"
+            "<p>一个简单易用的图片爬取工具</p>"
+            "<p>支持多个图片来源：</p>"
+            "<ul>"
+            "<li>Unsplash, Pexels, Pixabay</li>"
+            "<li>Wallhaven, WallpaperFlare</li>"
+            "<li>Bing 搜索与每日壁纸</li>"
+            "<li>多个中文壁纸API</li>"
+            "</ul>"
+            "<p>GitHub: https://github.com/Anthony-981/pic_fetch</p>"
+        )
 
     def _create_left_panel(self) -> QWidget:
         """创建左侧面板"""
